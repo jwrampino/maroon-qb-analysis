@@ -21,8 +21,8 @@ Install:
     pip install pandas numpy matplotlib scipy pillow
 
 Usage:
-    python qb_viz.py
-    python qb_viz.py --csv qb_combined.csv --outdir qb_viz_outputs
+    python qb_viz_combined.py
+    python qb_viz_combined.py --csv qb_combined.csv --outdir qb_viz_outputs
 """
 
 from __future__ import annotations
