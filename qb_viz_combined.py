@@ -42,9 +42,21 @@ matplotlib.rcParams["figure.dpi"] = 150
 matplotlib.rcParams["savefig.dpi"] = 300
 
 # Config
-USE_LOGOS   = False
-LOGOS_DIR   = Path("logos")
-LOGO_ZOOM   = 0.022   # scale factor for logo images in scatter
+USE_LOGOS      = True
+LOGOS_DIR      = Path("logos")
+LOGO_SIZE_PTS  = 20   # target rendered size of each logo in points (scatter)
+LOGO_SIZE_LEG  = 26   # target rendered size in the legend
+
+# PFR team abbreviations to logo filename stems (only entries that differ)
+TEAM_ABBR_MAP = {
+    "GNB": "GB",
+    "KAN": "KC",
+    "LVR": "LV",
+    "NOR": "NO",
+    "NWE": "NE",
+    "SFO": "SF",
+    "TAM": "TB",
+}
 
 HIGHLIGHT_PLAYER = "Caleb Williams"
 DEFAULT_CSV      = "qb_combined.csv"
@@ -172,11 +184,25 @@ def to_number(series):
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+def resolve_abbr(team_abbr):
+    """Map a CSV team abbreviation to the logo filename stem."""
+    return TEAM_ABBR_MAP.get(str(team_abbr), str(team_abbr))
+
+
+def logo_zoom(img, target_pts):
+    """Return OffsetImage zoom so the logo renders at ~target_pts in points."""
+    dpi = float(matplotlib.rcParams.get("figure.dpi", 150))
+    px  = max(img.shape[0], img.shape[1])
+    if px == 0:
+        return 0.02
+    return (target_pts / 72.0) * dpi / px
+
+
 def load_logo(team_abbr):
     """Load a logo PNG for a team abbreviation. Returns None if not found."""
     if not USE_LOGOS:
         return None
-    path = LOGOS_DIR / f"{team_abbr}.png"
+    path = LOGOS_DIR / f"{resolve_abbr(team_abbr)}.png"
     if not path.exists():
         return None
     try:
@@ -224,12 +250,48 @@ def pick_ticks(vmin, vmax, n=4):
     return list(np.linspace(vmin, vmax, n + 2)[1:-1])
 
 
+def repel_positions(xs, ys, xmin, xmax, ymin, ymax, min_sep=0.07, iters=80):
+    """Nudge overlapping marker positions apart in normalised [0,1] axis space."""
+    n = len(xs)
+    if n < 2:
+        return list(xs), list(ys)
+    xspan = (xmax - xmin) or 1.0
+    yspan = (ymax - ymin) or 1.0
+    nx = [(x - xmin) / xspan for x in xs]
+    ny = [(y - ymin) / yspan for y in ys]
+
+    for _ in range(iters):
+        moved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = nx[i] - nx[j]
+                dy = ny[i] - ny[j]
+                dist = (dx * dx + dy * dy) ** 0.5 or 1e-9
+                if dist < min_sep:
+                    push = (min_sep - dist) / 2.0 / dist
+                    nx[i] += dx * push * 0.5
+                    ny[i] += dy * push * 0.5
+                    nx[j] -= dx * push * 0.5
+                    ny[j] -= dy * push * 0.5
+                    moved = True
+        if not moved:
+            break
+
+    pad = 0.02
+    nx = [max(pad, min(1.0 - pad, v)) for v in nx]
+    ny = [max(pad, min(1.0 - pad, v)) for v in ny]
+
+    out_x = [xmin + v * xspan for v in nx]
+    out_y = [ymin + v * yspan for v in ny]
+    return out_x, out_y
+
+
 def plot_marker(ax, x, y, team, logo_cache, is_caleb=False, label_color=None):
     """Plot a single QB marker — logo or dot. label_color is set for labeled QBs."""
     logo = logo_cache.get(str(team)) if logo_cache else None
 
     if logo is not None:
-        imagebox = OffsetImage(logo, zoom=LOGO_ZOOM)
+        imagebox = OffsetImage(logo, zoom=logo_zoom(logo, LOGO_SIZE_PTS))
         ab = AnnotationBbox(imagebox, (x, y), frameon=is_caleb,
                             bboxprops=dict(edgecolor="#111", linewidth=1.5 if is_caleb else 0),
                             zorder=4 if is_caleb else 2)
@@ -278,9 +340,18 @@ def draw_panel(ax_scatter, ax_info, data, panel, player_col, team_col, logo_cach
     ax_scatter.axvline(xmid, color="#888", linewidth=0.8, linestyle="--", zorder=1, alpha=0.7)
     ax_scatter.axhline(ymid, color="#888", linewidth=0.8, linestyle="--", zorder=1, alpha=0.7)
 
+    # Nudge overlapping logos apart before plotting
+    xs_rep, ys_rep = repel_positions(
+        sub[x_col].tolist(), sub[y_col].tolist(),
+        xmin, xmax, ymin, ymax, min_sep=0.07, iters=80
+    )
+    sub = sub.copy()
+    sub["_x_rep"] = xs_rep
+    sub["_y_rep"] = ys_rep
+
     for _, row in sub.iterrows():
         lc = row["_label_color"] if pd.notna(row["_label_color"]) else None
-        plot_marker(ax_scatter, row[x_col], row[y_col], row[team_col],
+        plot_marker(ax_scatter, row["_x_rep"], row["_y_rep"], row[team_col],
                     logo_cache, is_caleb=row["_is_caleb"], label_color=lc)
 
     ax_scatter.set_xlim(xmin, xmax)
@@ -318,7 +389,7 @@ def draw_panel(ax_scatter, ax_info, data, panel, player_col, team_col, logo_cach
     caleb_logo = logo_cache.get(str(caleb_team[0])) if (USE_LOGOS and len(caleb_team)) else None
 
     if caleb_logo is not None:
-        imagebox = OffsetImage(caleb_logo, zoom=LOGO_ZOOM * 1.8)
+        imagebox = OffsetImage(caleb_logo, zoom=logo_zoom(caleb_logo, LOGO_SIZE_LEG))
         ab = AnnotationBbox(imagebox, (0.055, legend_y), frameon=False,
                             xycoords=ax_info.transAxes, zorder=5)
         ax_info.add_artist(ab)
@@ -336,7 +407,7 @@ def draw_panel(ax_scatter, ax_info, data, panel, player_col, team_col, logo_cach
             sub.loc[sub[player_col].map(normalize_player) == normalize_player(name), team_col]
             .values[0])) if USE_LOGOS else None
         if logo is not None:
-            imagebox = OffsetImage(logo, zoom=LOGO_ZOOM * 1.6)
+            imagebox = OffsetImage(logo, zoom=logo_zoom(logo, LOGO_SIZE_LEG))
             ab = AnnotationBbox(imagebox, (0.055, legend_cursor), frameon=False,
                                 xycoords=ax_info.transAxes, zorder=5)
             ax_info.add_artist(ab)
